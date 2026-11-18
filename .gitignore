@@ -1,0 +1,25 @@
+# 编译产物
+bin/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.zip
+
+# 运行时数据（壁纸缓存、收藏、配置、日志）
+wallpapers/
+thumbs/
+config.ini
+favorites.txt
+*.log
+
+# 生成出来的图标（build.ps1 每次会重新生成）
+src/res/app.ico
+
+# VS / 临时文件
+.vs/
+*.suo
+*.user
+*.tmp
