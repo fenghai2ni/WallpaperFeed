@@ -154,8 +154,9 @@ max_cache_mb=1024         # 壁纸数据占用上限（MB），0 = 不限制
 工具从 wallpaperfeed.com 的公开页面抓取，逻辑如下：
 
 1. 抓取列表页（`/trending`、`/new`、`/popular`、`/category/<slug>`、`/tag/<name>`），
-   解析卡片中的 `data-wallpaper-id`、详情页地址、原图宽高和缩略图地址。站点没有分页，
-   因此界面靠「多个列表页排队 + 去重」实现无限滚动。
+   解析卡片中的 `data-wallpaper-id`、详情页地址、原图宽高和缩略图地址。
+   分类页支持 `?page=N`（每页 32 张且互不重复），程序按 `category?page=N` 与 `tag?page=N` 交替往后翻；
+   「发现」页则靠多个列表页排队 + 去重来实现无限滚动。
 2. 缩略图直接用站点的 `/uploads/thumbnails/*.webp`（约 30 KB，300 ms 级），
    用 WIC 解码为 BGRA 后交给 GDI+ 绘制。
 3. 应用壁纸时用 `POST https://wallpaperfeed.com/api/download.php`
@@ -168,8 +169,8 @@ max_cache_mb=1024         # 壁纸数据占用上限（MB），0 = 不限制
 ## 目录结构
 
 ```
-壁纸/
-├─ bin/
+WallpaperFeed/
+├─ bin/                      编译产物与运行时数据（不纳入版本库）
 │  ├─ WallpaperFeed.exe      编译产物
 │  ├─ config.ini             运行时生成
 │  ├─ WallpaperFeed.log      运行日志（大于 2MB 自动滚动）
