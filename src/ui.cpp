@@ -5,6 +5,7 @@
 #include "wf.h"
 
 #include <dwmapi.h>
+#include <psapi.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -13,6 +14,7 @@
 #include <cstdio>
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdiplus.lib")
 
@@ -39,6 +41,7 @@ const int HIT_CLEAN_NOW = 1330;
 const int HIT_REFRESH = 1600;
 const int HIT_SCROLL_TRACK = 1610;
 const int HIT_CAT_BASE = 2000;
+const int HIT_RES_BASE = 2200;         // 屏幕尺寸规格（0 = 全部）
 const int HIT_CARD_BASE = 5000;        // + idx*10 + sub
 const int HIT_CARD_OPEN_BASE = 30000;  // + idx
 const int HIT_PREVIEW_CLOSE = 40000;
@@ -356,6 +359,9 @@ void MainWindow::Show() {
     if (!loadedOnce_) {
         loadedOnce_ = true;
         SwitchPage(Page::Discover);
+    } else if (items_.empty()) {
+        // Hide() 时把列表与位图都释放了，重新打开时把数据补回来（位图按需重新解码）
+        items_ = lib_->Snapshot();
     }
     ShowWindow(hwnd_, SW_SHOW);
     SetForegroundWindow(hwnd_);
@@ -370,6 +376,40 @@ void MainWindow::Hide() {
     if (!hwnd_) return;
     KillTimer(hwnd_, 1);
     ShowWindow(hwnd_, SW_HIDE);
+    ReleaseMemory();
+}
+
+// 关闭主界面时把缩略图位图、卡片列表、预览缓存全部还给系统，
+// 只保留壁纸库的数据（数量很小），下次打开再按需重新解码。
+void MainWindow::ReleaseMemory() {
+    if (previewThread_.joinable()) previewThread_.join();
+    previewLoading_ = false;
+    previewOpen_ = false;
+    previewItem_.reset();
+    previewBmp_.reset();
+    previewBuf_.reset();
+
+    images_.clear();
+    cards_.clear();
+    items_.clear();
+    hits_.clear();
+    hoverCard_ = -1;
+    scrollY_ = 0;
+
+    // 通知系统回收本进程的工作集（已释放的堆页立刻还给系统）
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    LogMsg(L"主界面已关闭，内存已释放");
+}
+
+void MainWindow::OnResolutionChanged() {
+    scrollY_ = 0;
+    if (page_ == Page::Discover) lib_->SetMode(LibraryMode::Discover, L"", cfg_->resolution);
+    else if (page_ == Page::Category) lib_->SetMode(LibraryMode::Category, catSlug_, cfg_->resolution);
+    items_ = lib_->Snapshot();
+    if (hwnd_) {
+        Relayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 void MainWindow::Toggle() {
@@ -408,9 +448,11 @@ int MainWindow::GridTop(int W) const {
         int capW = S(108), gap = S(8);
         int per = (avail + gap) / (capW + gap);
         if (per < 1) per = 1;
+        int resCount = (int)GetResolutions().size() + 1;   // 含「全部尺寸」
+        int resRows = (resCount + per - 1) / per;
         size_t cats = GetCategories().size();
         int rows = (int)((cats + per - 1) / per);
-        return S(96) + rows * S(44) + S(8);
+        return S(96) + resRows * S(44) + S(6) + rows * S(44) + S(8);
     }
     return S(100);
 }
@@ -566,7 +608,7 @@ void MainWindow::DrawSidebar(Graphics& g, int W, int H) {
             Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
     DrawStr(g, L"本地占用 " + FormatBytes(cacheBytes_), Rect(S(24), by + S(40), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
-    DrawStr(g, L"v1.3.1  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
+    DrawStr(g, L"v1.4.0  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 86, 96, 114), StringAlignmentNear, StringAlignmentNear, false);
 }
 
@@ -578,11 +620,20 @@ void MainWindow::DrawHeader(Graphics& g, int W, int H) {
     switch (page_) {
     case Page::Discover:
         title = L"发现";
-        sub = L"每日更新的高清壁纸 · 向下滚动自动加载";
+        if (!cfg_->resolution.empty()) {
+            sub = L"屏幕尺寸 " + cfg_->ResolutionLabel() + L" · 向下滚动自动加载";
+        } else {
+            sub = L"每日更新的高清壁纸 · 向下滚动自动加载";
+        }
         break;
     case Page::Category:
         title = L"分类";
-        sub = catLabel_ + L" · 已加载 " + std::to_wstring(items_.size()) + L" 张";
+        if (!cfg_->resolution.empty()) {
+            sub = L"屏幕尺寸 " + cfg_->ResolutionLabel() + L" · 已加载 " +
+                  std::to_wstring(items_.size()) + L" 张";
+        } else {
+            sub = catLabel_ + L" · 已加载 " + std::to_wstring(items_.size()) + L" 张";
+        }
         break;
     case Page::Favorites:
         title = L"我的收藏";
@@ -617,13 +668,36 @@ void MainWindow::DrawCategoryRow(Graphics& g, int W, int H) {
     if (per < 1) per = 1;
 
     int y = S(96);
+
+    // ── 第一排：按站点「屏幕尺寸」分类筛选（/theme/<slug>）──
+    const auto& resList = GetResolutions();
+    int resCount = (int)resList.size() + 1;
+    for (int i = 0; i < resCount; ++i) {
+        int col = i % per;
+        int row = i / per;
+        RECT r{x0 + col * (capW + gap), y + row * S(44),
+               x0 + col * (capW + gap) + capW, y + row * S(44) + capH};
+        bool on = (i == 0) ? cfg_->resolution.empty()
+                           : (cfg_->resolution == resList[i - 1].slug);
+        FillRound(g, TR(r), S(18), on ? Clr(255, 26, 66, 96) : Clr(255, 24, 30, 40));
+        if (on) StrokeRound(g, TR(r), S(18), Clr(255, 96, 165, 250), 1.0f);
+        DrawStr(g, i == 0 ? L"全部尺寸" : resList[i - 1].label, TR(r), fSmall_.get(),
+                on ? Clr(255, 219, 234, 254) : Clr(255, 138, 150, 170),
+                StringAlignmentCenter);
+        hits_.push_back({r, HIT_RES_BASE + i});
+    }
+    int rows = (resCount + per - 1) / per;
+    y += rows * S(44) + S(6);
+
+    // ── 内容分类 ──
     const auto& cats = GetCategories();
     for (size_t i = 0; i < cats.size(); ++i) {
         int col = (int)i % per;
         int row = (int)i / per;
         RECT r{x0 + col * (capW + gap), y + row * S(44),
                x0 + col * (capW + gap) + capW, y + row * S(44) + capH};
-        bool on = (catSlug_ == cats[i].slug);
+        // 选了尺寸规格时走尺寸图库，分类胶囊不参与高亮
+        bool on = (catSlug_ == cats[i].slug) && cfg_->resolution.empty();
         RECT rr = r;
         FillRound(g, TR(rr), S(18), on ? Clr(255, 37, 71, 128) : Clr(255, 26, 32, 42));
         if (on) StrokeRound(g, TR(rr), S(18), Clr(255, 59, 130, 246), 1.0f);
@@ -994,7 +1068,7 @@ void MainWindow::DrawSettings(Graphics& g, int W, int H) {
     DrawStr(g, L"关于", Rect(x, y, w, S(22)), fSection_.get(), txt, StringAlignmentNear,
             StringAlignmentNear, false);
     y += S(28);
-    DrawStr(g, L"WallpaperFeed v1.3.1 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
+    DrawStr(g, L"WallpaperFeed v1.4.0 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
             Rect(x, y, w, S(20)), fSmall_.get(), Clr(255, 110, 121, 140), StringAlignmentNear,
             StringAlignmentNear);
     y += S(24);
@@ -1164,8 +1238,8 @@ void MainWindow::SwitchPage(Page p) {
     scrollY_ = 0;
     items_.clear();
 
-    if (p == Page::Discover) lib_->SetMode(LibraryMode::Discover);
-    else if (p == Page::Category) lib_->SetMode(LibraryMode::Category, catSlug_);
+    if (p == Page::Discover) lib_->SetMode(LibraryMode::Discover, L"", cfg_->resolution);
+    else if (p == Page::Category) lib_->SetMode(LibraryMode::Category, catSlug_, cfg_->resolution);
     else if (p == Page::Favorites) lib_->SetMode(LibraryMode::Favorites);
     else { /* Settings: 不动数据 */ }
 
@@ -1179,9 +1253,11 @@ void MainWindow::SwitchCategory(int index) {
     if (index < 0 || index >= (int)cats.size()) return;
     catSlug_ = cats[index].slug;
     catLabel_ = cats[index].label;
-    catLabel_ = cats[index].label;
+    // 站点不支持「分类 + 尺寸」叠加，点分类就回到不限尺寸
+    cfg_->resolution.clear();
+    cfg_->Save(configPath_);
     scrollY_ = 0;
-    lib_->SetMode(LibraryMode::Category, catSlug_);
+    lib_->SetMode(LibraryMode::Category, catSlug_, L"");
     items_ = lib_->Snapshot();
     Relayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1269,13 +1345,29 @@ void MainWindow::OnClick(POINT pt) {
         else if (p == Page::Discover) lib_->RequestMore();
         return;
     }
+    if (hit >= HIT_RES_BASE && hit < HIT_RES_BASE + 20) {
+        int idx = hit - HIT_RES_BASE;
+        const auto& resList = GetResolutions();
+        std::wstring slug = (idx <= 0 || idx > (int)resList.size()) ? L""
+                                                                   : resList[idx - 1].slug;
+        cfg_->resolution = slug;
+        cfg_->Save(configPath_);
+        scrollY_ = 0;
+        lib_->SetMode(LibraryMode::Category, catSlug_, slug);
+        items_ = lib_->Snapshot();
+        Relayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (slug.empty()) Toast(L"已取消尺寸筛选");
+        else Toast(L"已切换到 " + cfg_->ResolutionLabel() + L" 尺寸图库");
+        return;
+    }
     if (hit >= HIT_CAT_BASE && hit < HIT_CAT_BASE + 50) {
         SwitchCategory(hit - HIT_CAT_BASE);
         return;
     }
     if (hit == HIT_REFRESH) {
-        if (page_ == Page::Discover) lib_->SetMode(LibraryMode::Discover);
-        else if (page_ == Page::Category) lib_->SetMode(LibraryMode::Category, catSlug_);
+        if (page_ == Page::Discover) lib_->SetMode(LibraryMode::Discover, L"", cfg_->resolution);
+        else if (page_ == Page::Category) lib_->SetMode(LibraryMode::Category, catSlug_, cfg_->resolution);
         else if (page_ == Page::Favorites) lib_->ReloadFavorites();
         items_ = lib_->Snapshot();
         scrollY_ = 0;

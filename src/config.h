@@ -15,6 +15,9 @@ struct Config {
     std::wstring tagName = L"nature";
     std::wstring customUrl = L"";
 
+    // 屏幕尺寸规格：站点 /theme/<slug>（4k / 8k / ultrawide …），空 = 不限
+    std::wstring resolution = L"";
+
     int  keepFiles = 40;            // 本地缓存保留数量
     int  jpegQuality = 92;
     int  requestCapWidth = 5120;    // 单次下载请求的最大宽度
@@ -33,6 +36,8 @@ struct Config {
 
     std::wstring SourceUrl() const;     // 由 source 派生出的列表页 URL
     std::wstring SourceLabel() const;   // 菜单中显示的名称
+    std::wstring ResolutionLabel() const;          // 尺寸规格的中文名，空 = 不限
+    bool ResolutionSize(int& w, int& h) const;     // 规格对应的像素尺寸
 };
 
 // 最近用过的壁纸 id，避免连续重复
@@ -52,3 +57,11 @@ struct CategoryDef {
     const wchar_t* label;
 };
 const std::vector<CategoryDef>& GetCategories();
+
+// 站点「按屏幕尺寸」分类（/theme/<slug>）
+struct ResolutionDef {
+    const wchar_t* slug;
+    const wchar_t* label;
+    int w, h;
+};
+const std::vector<ResolutionDef>& GetResolutions();

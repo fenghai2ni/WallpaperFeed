@@ -34,6 +34,8 @@ public:
     bool IsVisible() const;
     HWND Handle() const { return hwnd_; }
 
+    void OnResolutionChanged();   // 托盘里改了图片规格后同步当前列表
+
     void OnLibraryUpdated();
     void OnThumbReady();
 
@@ -84,6 +86,7 @@ private:
 
     Gdiplus::Bitmap* GetImage(const ItemPtr& item);
     void EvictImages();
+    void ReleaseMemory();
 
     // ── 交互 ──
     void SwitchPage(Page p);

@@ -56,6 +56,7 @@ void Config::Load(const std::wstring& path) {
     categorySlug = GetStr(kv, "category", categorySlug);
     tagName = GetStr(kv, "tag", tagName);
     customUrl = GetStr(kv, "custom_url", customUrl);
+    resolution = GetStr(kv, "resolution", resolution);
     keepFiles = GetInt(kv, "keep_files", keepFiles);
     jpegQuality = GetInt(kv, "jpeg_quality", jpegQuality);
     requestCapWidth = GetInt(kv, "request_cap_width", requestCapWidth);
@@ -87,6 +88,8 @@ void Config::Save(const std::wstring& path) const {
     out << "category=" << WideToUtf8(categorySlug) << "\r\n";
     out << "tag=" << WideToUtf8(tagName) << "\r\n";
     out << "custom_url=" << WideToUtf8(customUrl) << "\r\n";
+    out << "# 屏幕尺寸规格：空 = 不限，或 1920x1080 / 2560x1440 / 4k / 5k / 8k / ultrawide / dual-monitor / macbook / phone\r\n";
+    out << "resolution=" << WideToUtf8(resolution) << "\r\n";
     out << "keep_files=" << keepFiles << "\r\n";
     out << "jpeg_quality=" << jpegQuality << "\r\n";
     out << "request_cap_width=" << requestCapWidth << "\r\n";
@@ -106,6 +109,8 @@ void Config::Save(const std::wstring& path) const {
 
 std::wstring Config::SourceUrl() const {
     const std::wstring base = L"https://wallpaperfeed.com";
+    // 选了屏幕尺寸规格时，优先用站点的 /theme/<slug> 图库（站点不支持分类和尺寸叠加）
+    if (!resolution.empty()) return base + L"/theme/" + resolution;
     if (source == L"new") return base + L"/new";
     if (source == L"popular") return base + L"/popular";
     if (source == L"category") return base + L"/category/" + categorySlug;
@@ -118,6 +123,10 @@ std::wstring Config::SourceUrl() const {
 }
 
 std::wstring Config::SourceLabel() const {
+    if (!resolution.empty()) {
+        std::wstring rl = ResolutionLabel();
+        return L"规格 / " + (rl.empty() ? resolution : rl);
+    }
     if (source == L"new") return L"最新上传";
     if (source == L"popular") return L"最高下载";
     if (source == L"category") {
@@ -192,4 +201,33 @@ const std::vector<CategoryDef>& GetCategories() {
         {L"weapons",          L"武器"},
     };
     return cats;
+}
+
+const std::vector<ResolutionDef>& GetResolutions() {
+    static const std::vector<ResolutionDef> res = {
+        {L"1920x1080",   L"1080P",      1920, 1080},
+        {L"2560x1440",   L"2K",         2560, 1440},
+        {L"4k",          L"4K",         3840, 2160},
+        {L"5k",          L"5K",         5120, 2880},
+        {L"8k",          L"8K",         7680, 4320},
+        {L"ultrawide",   L"带鱼屏",      3440, 1440},
+        {L"dual-monitor",L"双屏拼接",    3840, 1080},
+        {L"macbook",     L"MacBook",    2880, 1800},
+        {L"phone",       L"手机竖屏",     1080, 1920},
+    };
+    return res;
+}
+
+std::wstring Config::ResolutionLabel() const {
+    for (const auto& r : GetResolutions()) {
+        if (resolution == r.slug) return r.label;
+    }
+    return resolution;
+}
+
+bool Config::ResolutionSize(int& w, int& h) const {
+    for (const auto& r : GetResolutions()) {
+        if (resolution == r.slug) { w = r.w; h = r.h; return true; }
+    }
+    return false;
 }

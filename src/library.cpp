@@ -106,12 +106,15 @@ ItemPtr Library::MakeItem(const WfItem& src) {
     return it;
 }
 
-void Library::SetMode(LibraryMode mode, const std::wstring& categorySlug) {
+void Library::SetMode(LibraryMode mode, const std::wstring& categorySlug,
+                      const std::wstring& resolutionSlug) {
     std::vector<ItemPtr> favItems;
     {
         std::lock_guard<std::mutex> lk(mu_);
         mode_ = mode;
         if (!categorySlug.empty()) categorySlug_ = categorySlug;
+        resSlug_ = resolutionSlug;
+        resPage_ = 1;
         items_.clear();
         seen_.clear();
         // 内容源队列跨页面保留，切回「发现」时可立即加载，不用重新抓取
@@ -213,6 +216,12 @@ void Library::ListWorkerMain() {
 
 std::wstring Library::NextSourceUrl() {
     std::lock_guard<std::mutex> lk(mu_);
+    // 选了屏幕尺寸规格：整站只按 /theme/<slug> 翻页（站点不支持分类 + 尺寸叠加）
+    if (!resSlug_.empty()) {
+        std::wstring url = std::wstring(kBase) + L"/theme/" + resSlug_;
+        if (resPage_ > 1) url += L"?page=" + std::to_wstring(resPage_);
+        return url;
+    }
     if (mode_ == LibraryMode::Category) {
         // 只读不推进：页码在真正取到一页之后才往前走，失败不会把源耗光
         if (catDead_ && tagDead_) return std::wstring();
@@ -352,9 +361,28 @@ void Library::DoLoadMore() {
 
         std::vector<WfItem> raw;
         std::wstring err;
+        bool themeMode = false;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            themeMode = !resSlug_.empty();
+        }
         if (!WallpaperFeed::GetListing(url, raw, err)) {
-            // 404 = 这一路已经翻到底，只是标记，不算网络失败；其它错误才计数
             bool gone404 = err.find(L"404") != std::wstring::npos;
+            if (themeMode) {
+                if (gone404) {
+                    // 尺寸图库翻到最后一页时站点直接返回 404
+                    std::lock_guard<std::mutex> lk(mu_);
+                    noMore_ = true;
+                    LogMsg(L"尺寸图库已翻到底 %s", url.c_str());
+                    continue;
+                }
+                ++fails;
+                LogMsg(L"列表请求失败(%d/4) %s : %s", fails, url.c_str(), err.c_str());
+                if (fails >= 4) break;
+                Sleep(250);
+                continue;
+            }
+            // 404 = 这一路已经翻到底，只是标记，不算网络失败；其它错误才计数
             if (mode == LibraryMode::Category && gone404) {
                 std::lock_guard<std::mutex> lk(mu_);
                 if (catTurn_ == 0) catDead_ = true; else tagDead_ = true;
@@ -372,7 +400,10 @@ void Library::DoLoadMore() {
         }
 
         // 这一页已经取到，翻到下一个源（category?page=N → tag?page=N → category?page=N+1）
-        if (mode == LibraryMode::Category) {
+        if (themeMode) {
+            std::lock_guard<std::mutex> lk(mu_);
+            ++resPage_;
+        } else if (mode == LibraryMode::Category) {
             AdvanceCategoryPage();
         }
 
@@ -410,7 +441,9 @@ void Library::DoLoadMore() {
 
     {
         std::lock_guard<std::mutex> lk(mu_);
-        if (mode == LibraryMode::Category) {
+        if (!resSlug_.empty()) {
+            if (resPage_ > 40 || fails >= 4 || emptyStreak_ >= 8) noMore_ = true;
+        } else if (mode == LibraryMode::Category) {
             // 分类是无限翻页：只有两路都翻到底、或连续取不到内容、或页码超过站点上限，才算真的到底
             if ((catDead_ && tagDead_) || fails >= 4 || catPage_ > 40 || emptyStreak_ >= 8) noMore_ = true;
         } else if (emptyStreak_ >= 4) {

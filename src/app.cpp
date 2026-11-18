@@ -20,7 +20,7 @@ namespace {
 
 const wchar_t* kClassName = L"WallpaperFeedTrayWnd";
 const wchar_t* kAppName = L"WallpaperFeed 壁纸";
-const wchar_t* kVersion = L"1.0.0";
+const wchar_t* kVersion = L"1.4.0";
 
 const UINT WM_APP_TRAY = WM_APP + 1;
 const UINT WM_APP_CHANGED = WM_APP + 2;
@@ -44,6 +44,7 @@ enum MenuId {
     ID_M_SRC_POPULAR = 2022,
 
     ID_M_CAT_BASE = 2100,
+    ID_M_RES_BASE = 2200,      // +0 = 不限，+1.. = GetResolutions() 顺序
 
     ID_M_AUTOSTART = 3001,
     ID_M_OPEN_CACHE = 3002,
@@ -409,6 +410,7 @@ void App::ShowMenu(POINT pt) {
     HMENU intMenu = CreatePopupMenu();
     HMENU srcMenu = CreatePopupMenu();
     HMENU catMenu = CreatePopupMenu();
+    HMENU resMenu = CreatePopupMenu();
 
     AppendMenuW(menu, MF_STRING, ID_M_OPEN_UI, L"打开主界面");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -451,21 +453,39 @@ void App::ShowMenu(POINT pt) {
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)intMenu, intTitle);
 
     // 来源
-    AppendMenuW(srcMenu, MF_STRING | (cfg_.source == L"trending" ? MF_CHECKED : 0),
+    bool noRes = cfg_.resolution.empty();
+    AppendMenuW(srcMenu, MF_STRING | ((noRes && cfg_.source == L"trending") ? MF_CHECKED : 0),
                 ID_M_SRC_TRENDING, L"本周趋势");
-    AppendMenuW(srcMenu, MF_STRING | (cfg_.source == L"new" ? MF_CHECKED : 0),
+    AppendMenuW(srcMenu, MF_STRING | ((noRes && cfg_.source == L"new") ? MF_CHECKED : 0),
                 ID_M_SRC_NEW, L"最新上传");
-    AppendMenuW(srcMenu, MF_STRING | (cfg_.source == L"popular" ? MF_CHECKED : 0),
+    AppendMenuW(srcMenu, MF_STRING | ((noRes && cfg_.source == L"popular") ? MF_CHECKED : 0),
                 ID_M_SRC_POPULAR, L"最高下载");
 
     const auto& cats = GetCategories();
     for (size_t i = 0; i < cats.size(); ++i) {
         UINT flags = MF_STRING |
-                     ((cfg_.source == L"category" && cfg_.categorySlug == cats[i].slug) ? MF_CHECKED : 0);
+                     ((noRes && cfg_.source == L"category" && cfg_.categorySlug == cats[i].slug)
+                          ? MF_CHECKED : 0);
         AppendMenuW(catMenu, flags, ID_M_CAT_BASE + (UINT)i, cats[i].label);
     }
     AppendMenuW(srcMenu, MF_POPUP, (UINT_PTR)catMenu, L"按分类挑选");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)srcMenu, L"壁纸来源");
+
+    // 图片规格（站点按屏幕尺寸分类 /theme/<slug>）
+    AppendMenuW(resMenu, MF_STRING | (cfg_.resolution.empty() ? MF_CHECKED : 0),
+                ID_M_RES_BASE, L"不限（按内容分类）");
+    AppendMenuW(resMenu, MF_SEPARATOR, 0, nullptr);
+    const auto& resList = GetResolutions();
+    for (size_t i = 0; i < resList.size(); ++i) {
+        wchar_t buf[96];
+        swprintf_s(buf, L"%ls  %dx%d", resList[i].label, resList[i].w, resList[i].h);
+        UINT flags = MF_STRING | ((cfg_.resolution == resList[i].slug) ? MF_CHECKED : 0);
+        AppendMenuW(resMenu, flags, ID_M_RES_BASE + 1 + (UINT)i, buf);
+    }
+    wchar_t resTitle[96];
+    if (cfg_.resolution.empty()) wcscpy_s(resTitle, L"图片规格（不限）");
+    else swprintf_s(resTitle, L"图片规格（%ls）", cfg_.ResolutionLabel().c_str());
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)resMenu, resTitle);
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (cfg_.autostart ? MF_CHECKED : 0), ID_M_AUTOSTART, L"开机自动启动");
@@ -523,6 +543,7 @@ void App::OnCommand(UINT id) {
         if (id == ID_M_SRC_TRENDING) cfg_.source = L"trending";
         else if (id == ID_M_SRC_NEW) cfg_.source = L"new";
         else cfg_.source = L"popular";
+        cfg_.resolution.clear();
         cfg_.Save(configPath_);
         UpdateTrayTip();
         {
@@ -532,12 +553,35 @@ void App::OnCommand(UINT id) {
         StartChange(true);
         return;
     }
-    if (id >= ID_M_CAT_BASE) {
+    if (id >= ID_M_RES_BASE && id < ID_M_RES_BASE + 32) {
+        const auto& res = GetResolutions();
+        size_t idx = id - ID_M_RES_BASE;   // 0 = 不限
+        cfg_.resolution = (idx >= 1 && idx <= res.size()) ? res[idx - 1].slug : L"";
+        cfg_.Save(configPath_);
+        UpdateTrayTip();
+        {
+            std::lock_guard<std::mutex> lk(cacheMutex_);
+            cachedUrl_.clear();
+        }
+        if (ui_) ui_->OnResolutionChanged();
+        StartChange(true);
+        if (cfg_.resolution.empty()) {
+            ShowTip(L"图片规格：不限", L"按当前壁纸来源更换。");
+        } else {
+            wchar_t buf[128];
+            swprintf_s(buf, L"按 %ls 规格下载并更换（%d×%d）",
+                       cfg_.ResolutionLabel().c_str(), res[idx - 1].w, res[idx - 1].h);
+            ShowTip(L"图片规格已切换", buf);
+        }
+        return;
+    }
+    if (id >= ID_M_CAT_BASE && id < ID_M_RES_BASE) {
         const auto& cats = GetCategories();
         size_t idx = id - ID_M_CAT_BASE;
         if (idx < cats.size()) {
             cfg_.source = L"category";
             cfg_.categorySlug = cats[idx].slug;
+            cfg_.resolution.clear();   // 站点不支持分类 + 尺寸叠加
             cfg_.Save(configPath_);
             UpdateTrayTip();
             {
@@ -746,6 +790,16 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
         }
     }
 
+    // 用户指定了图片规格：取「屏幕尺寸」和「规格尺寸」里更大的那个，
+    // 保证既不浪费也不缩小（例如 4K 规格在 1080P 屏上仍按 3840×2160 取图）
+    int capW = cfg.requestCapWidth;
+    int specW = 0, specH = 0;
+    if (cfg.ResolutionSize(specW, specH)) {
+        targetW = std::max(targetW, specW);
+        targetH = std::max(targetH, specH);
+        if (capW < specW) capW = specW;
+    }
+
     std::vector<WfItem> pool;
     if (!GetItems(cfg, pool, err)) {
         resultMsg = L"获取壁纸列表失败：" + err;
@@ -766,7 +820,7 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
         if (chosen.size() >= needCount) break;
 
         int reqH = 0;
-        int reqW = RequestWidth(it, targetW, targetH, cfg.requestCapWidth, reqH);
+        int reqW = RequestWidth(it, targetW, targetH, capW, reqH);
         wchar_t name[160];
         swprintf_s(name, L"wf_%d_%dx%d.jpg", it.id, reqW, reqH);
         std::wstring srcFile = PathJoin(srcDir_, name);

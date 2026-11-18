@@ -45,7 +45,8 @@ public:
     void Init(const std::wstring& dataDir, HWND notifyWnd);
     void Shutdown();
 
-    void SetMode(LibraryMode mode, const std::wstring& categorySlug = L"");
+    void SetMode(LibraryMode mode, const std::wstring& categorySlug = L"",
+                 const std::wstring& resolutionSlug = L"");
     LibraryMode Mode() const { return mode_; }
     std::wstring CategorySlug() const { return categorySlug_; }
 
@@ -113,6 +114,8 @@ private:
     int generation_ = 0;
     LibraryMode mode_ = LibraryMode::Discover;
     std::wstring categorySlug_ = L"landscapes";
+    std::wstring resSlug_;          // 屏幕尺寸规格，非空时走 /theme/<slug>
+    int resPage_ = 1;
     std::vector<std::wstring> tags_;
 
     std::atomic<bool> loading_{false};
