@@ -9,6 +9,7 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 
 #pragma comment(lib, "shell32.lib")
@@ -20,7 +21,7 @@ namespace {
 
 const wchar_t* kClassName = L"WallpaperFeedTrayWnd";
 const wchar_t* kAppName = L"WallpaperFeed 壁纸";
-const wchar_t* kVersion = L"1.5.0";
+const wchar_t* kVersion = L"1.5.1";
 
 const UINT WM_APP_TRAY = WM_APP + 1;
 const UINT WM_APP_CHANGED = WM_APP + 2;
@@ -74,8 +75,85 @@ std::wstring PickDataDir() {
     return dir;
 }
 
-LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_NCCREATE) {
+// ── 本地图片池（站点列表接口挂掉时靠它继续换图）─────────────────────────
+std::string ReadFileUtf8(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return std::string();
+    std::string out;
+    LARGE_INTEGER sz{};
+    if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart < 16 * 1024 * 1024) {
+        out.resize((size_t)sz.QuadPart);
+        DWORD rd = 0;
+        if (ReadFile(h, &out[0], (DWORD)out.size(), &rd, nullptr)) out.resize(rd);
+        else out.clear();
+    }
+    CloseHandle(h);
+    return out;
+}
+
+std::wstring FindCachedSrc(const std::wstring& dir, int id) {
+    wchar_t pat[64];
+    swprintf_s(pat, L"wf_%d_*.jpg", id);
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(PathJoin(dir, pat).c_str(), &fd);
+    std::wstring out;
+    if (h != INVALID_HANDLE_VALUE) {
+        out = PathJoin(dir, std::wstring(fd.cFileName));
+        FindClose(h);
+    }
+    return out;
+}
+
+void SavePoolFile(const std::wstring& path, const std::vector<WfItem>& items) {
+    std::string out;
+    for (const auto& it : items) {
+        std::string title = it.title;
+        for (size_t i = 0; i < title.size(); ++i) {
+            if (title[i] == '\t' || title[i] == '\r' || title[i] == '\n') title[i] = ' ';
+        }
+        char head[64];
+        sprintf_s(head, "%d\t%d\t%d\t", it.id, it.w, it.h);
+        out += head;
+        out += it.thumbUrl; out += '\t';
+        out += it.href;     out += '\t';
+        out += title;       out += '\n';
+    }
+    WriteAllBytes(path, out.data(), out.size());
+}
+
+bool LoadPoolFile(const std::wstring& path, std::vector<WfItem>& items) {
+    std::string text = ReadFileUtf8(path);
+    if (text.empty()) return false;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        if (line.empty()) continue;
+        std::vector<std::string> f;
+        size_t s = 0;
+        while (true) {
+            size_t t = line.find('\t', s);
+            if (t == std::string::npos) { f.push_back(line.substr(s)); break; }
+            f.push_back(line.substr(s, t - s));
+            s = t + 1;
+        }
+        if (f.size() < 6) continue;
+        WfItem it;
+        it.id = atoi(f[0].c_str());
+        it.w = atoi(f[1].c_str());
+        it.h = atoi(f[2].c_str());
+        it.thumbUrl = f[3];
+        it.href = f[4];
+        it.title = f[5];
+        if (it.id > 0) items.push_back(it);
+    }
+    return !items.empty();
+}
+
+LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {    if (msg == WM_NCCREATE) {
         CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
     }
@@ -198,6 +276,22 @@ bool App::Init(bool launchedAtStartup) {
 
     recent_.Load(PathJoin(dataDir_, L"recent.txt"));
 
+    cacheStat_ = std::make_shared<CacheStat>();
+    cacheStat_->dirs[0] = cacheDir_;
+    cacheStat_->dirs[1] = PathJoin(dataDir_, L"thumbs");
+
+    prefetchFlag_ = std::make_shared<std::atomic<bool>>(false);
+
+    // 启动时先把上次落盘的图片池读进来，站点不通也能直接换图
+    {
+        std::vector<WfItem> saved;
+        if (LoadPoolFile(PathJoin(dataDir_, L"pool.txt"), saved) && !saved.empty()) {
+            std::lock_guard<std::mutex> lk(cacheMutex_);
+            cachedItems_.swap(saved);
+            LogMsg(L"载入本地图片池 %d 张", (int)cachedItems_.size());
+        }
+    }
+
     InitializeCriticalSection(&resultCs_);
 
     if (!gfx::Startup()) {
@@ -315,6 +409,7 @@ LRESULT App::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ShowTip(ok ? L"壁纸已更换" : L"更换失败", text, ok ? NIIF_INFO : NIIF_WARNING);
         }
         LogMsg(L"切换结果: %s - %s", ok ? L"成功" : L"失败", text.c_str());
+        if (ok) PrefetchNext();
         return 0;
     }
     case WM_APP_OPENMENU: {
@@ -713,6 +808,8 @@ void App::StartChange(bool manual) {
     Config snapshot = cfg_;
 
     worker_ = std::thread([this, snapshot]() {
+        // 换壁纸全程用「低于正常」优先级，下载/解码/JPEG 编码不抢前台程序的 CPU
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         std::wstring msg;
         bool ok = PerformChange(snapshot, msg);
@@ -777,6 +874,17 @@ bool App::GetItems(const Config& cfg, std::vector<WfItem>& items, std::wstring& 
             LogMsg(L"列表获取失败，使用缓存");
             return true;
         }
+        // 站点列表接口挂了也不能停摆：改用上次成功保存到本地的图片池
+        if (cachedItems_.empty()) {
+            std::vector<WfItem> saved;
+            if (LoadPoolFile(PathJoin(dataDir_, L"pool.txt"), saved)) cachedItems_.swap(saved);
+        }
+        if (!cachedItems_.empty()) {
+            items = cachedItems_;
+            err.clear();
+            LogMsg(L"列表获取失败，改用本地图片池（%d 张）", (int)items.size());
+            return true;
+        }
         return false;
     }
 
@@ -786,6 +894,8 @@ bool App::GetItems(const Config& cfg, std::vector<WfItem>& items, std::wstring& 
         cachedUrl_ = url;
         cachedTick_ = GetTickCount64();
     }
+    // 存一份到磁盘，下次站点抖动时不用干等
+    SavePoolFile(PathJoin(dataDir_, L"pool.txt"), fresh);
     items = fresh;
     return true;
 }
@@ -875,29 +985,81 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
         return false;
     }
 
-    // 下载（失败时自动换下一张候选）
+    // 记下这次的取图尺寸，空闲时按同样的尺寸预取下一张
+    pfTargetW_.store(targetW);
+    pfTargetH_.store(targetH);
+    pfCapW_.store(capW);
+
+    // 已经在本地（含上一次预取好的）候选排到前面，命中就直接跳过网络下载
+    {
+        std::vector<WfItem> hot, cold;
+        hot.reserve(candidates.size());
+        cold.reserve(candidates.size());
+        for (const auto& it : candidates) {
+            int reqH = 0;
+            int reqW = RequestWidth(it, targetW, targetH, capW, reqH);
+            wchar_t name[160];
+            swprintf_s(name, L"wf_%d_%dx%d.jpg", it.id, reqW, reqH);
+            // 精确尺寸的本地文件优先；退一步，同 id 的其它尺寸本地文件也能直接用（重新裁切即可）
+            if (FileExists(PathJoin(srcDir_, name)) || !FindCachedSrc(srcDir_, it.id).empty())
+                hot.push_back(it);
+            else cold.push_back(it);
+        }
+        hot.insert(hot.end(), cold.begin(), cold.end());
+        candidates.swap(hot);
+    }
+
+    // 并发下载候选：多张图同时取，谁先下完先用；单张失败立刻换下一张，不再串行干等慢图
     std::vector<WfItem> chosen;
     std::vector<std::wstring> srcFiles;
-    for (const auto& it : candidates) {
-        if (chosen.size() >= needCount) break;
+    {
+        std::atomic<size_t> nextIdx{0};
+        std::mutex mu;
+        const size_t need = needCount;
+        int nThreads = (int)std::min<size_t>(3, std::max<size_t>(1,
+                        std::min<size_t>(candidates.size(), needCount * 2)));
+        auto worker = [&]() {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (chosen.size() >= need) return;
+                }
+                size_t i = nextIdx.fetch_add(1);
+                if (i >= candidates.size()) return;
+                WfItem it = candidates[i];
 
-        int reqH = 0;
-        int reqW = RequestWidth(it, targetW, targetH, capW, reqH);
-        wchar_t name[160];
-        swprintf_s(name, L"wf_%d_%dx%d.jpg", it.id, reqW, reqH);
-        std::wstring srcFile = PathJoin(srcDir_, name);
+                int reqH = 0;
+                int reqW = RequestWidth(it, targetW, targetH, capW, reqH);
+                wchar_t name[160];
+                swprintf_s(name, L"wf_%d_%dx%d.jpg", it.id, reqW, reqH);
+                std::wstring srcFile = PathJoin(srcDir_, name);
 
-        bool have = FileExists(srcFile);
-        if (!have) {
-            std::wstring referer = WallpaperFeed::DetailReferer(it.href, it.id);
-            std::wstring derr;
-            have = WallpaperFeed::Download(it.id, referer, reqW, reqH, srcFile, derr);
-            if (!have) LogMsg(L"候选 %d 下载失败: %s", it.id, derr.c_str());
-        }
-        if (!have) continue;
+                std::wstring useFile = srcFile;
+                bool have = FileExists(srcFile);
+                if (!have) {
+                    // 同 id 的其它尺寸已经下过，直接拿来用，不再等网络
+                    std::wstring alt = FindCachedSrc(srcDir_, it.id);
+                    if (!alt.empty()) { have = true; useFile = alt; }
+                }
+                if (!have) {
+                    std::wstring referer = WallpaperFeed::DetailReferer(it.href, it.id);
+                    std::wstring derr;
+                    have = WallpaperFeed::Download(it.id, referer, reqW, reqH, srcFile, derr);
+                    if (!have) LogMsg(L"候选 %d 下载失败: %s", it.id, derr.c_str());
+                    else useFile = srcFile;
+                }
+                if (!have) continue;
 
-        chosen.push_back(it);
-        srcFiles.push_back(srcFile);
+                std::lock_guard<std::mutex> lk(mu);
+                if (chosen.size() >= need) return;
+                chosen.push_back(it);
+                srcFiles.push_back(useFile);
+            }
+        };
+        std::vector<std::thread> ths;
+        for (int t = 0; t < nThreads; ++t) ths.emplace_back(worker);
+        for (auto& t : ths) t.join();
     }
 
     if (chosen.size() < needCount) {
@@ -929,15 +1091,25 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
             return false;
         }
     } else {
+        // 同一张源图可能要被裁成多屏（复制模式），按来源分组后一次解码、多屏输出
+        std::map<size_t, std::vector<size_t>> bySrc;
         for (size_t i = 0; i < screens.size(); ++i) {
             size_t srcIdx = cloneMode ? 0 : (i < srcFiles.size() ? i : 0);
-            wchar_t name[180];
-            swprintf_s(name, L"%s_m%u_%d_%dx%d.jpg", cloneMode ? L"clone" : L"diff",
-                       (unsigned)i, chosen[srcIdx].id, screens[i].width, screens[i].height);
-            outFiles[i] = PathJoin(curDir_, name);
-            if (!gfx::RenderCoverCrop(srcFiles[srcIdx], screens[i].width, screens[i].height,
-                                      {RECT{0, 0, screens[i].width, screens[i].height}},
-                                      {outFiles[i]}, cfg.jpegQuality, err)) {
+            bySrc[srcIdx].push_back(i);
+        }
+        for (const auto& kv : bySrc) {
+            size_t srcIdx = kv.first;
+            std::vector<std::pair<int, int>> targets;
+            std::vector<std::wstring> dsts;
+            for (size_t i : kv.second) {
+                wchar_t name[180];
+                swprintf_s(name, L"%s_m%u_%d_%dx%d.jpg", cloneMode ? L"clone" : L"diff",
+                           (unsigned)i, chosen[srcIdx].id, screens[i].width, screens[i].height);
+                outFiles[i] = PathJoin(curDir_, name);
+                targets.push_back({screens[i].width, screens[i].height});
+                dsts.push_back(outFiles[i]);
+            }
+            if (!gfx::RenderScreens(srcFiles[srcIdx], targets, dsts, cfg.jpegQuality, err)) {
                 resultMsg = L"生成壁纸失败：" + err;
                 return false;
             }
@@ -990,6 +1162,59 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
     CleanupCache();
     CheckStorage(false);
     return true;
+}
+
+// 预取：趁空闲（屏幕上已经有壁纸、没有切换任务在跑）先把后面 2 张候选图下到 src\。
+// 站点列表/下载接口经常要十几秒甚至更久，提前下好之后，到点换壁纸就只剩解码+编码，几乎瞬间完成。
+void App::PrefetchNext() {
+    if (shuttingDown_ || busy_ || !prefetchFlag_) return;
+    if (prefetchFlag_->exchange(true)) return;
+
+    Config snapshot = cfg_;
+    std::wstring srcDir = srcDir_;
+    int tw = pfTargetW_.load();
+    int th = pfTargetH_.load();
+    int cap = pfCapW_.load();
+    if (tw <= 0 || th <= 0) {
+        prefetchFlag_->store(false);
+        return;
+    }
+
+    auto flag = prefetchFlag_;
+    std::thread([this, snapshot, srcDir, tw, th, cap, flag]() {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        std::wstring err;
+        std::vector<WfItem> pool;
+        if (GetItems(snapshot, pool, err) && !pool.empty()) {
+            std::vector<WfItem> cands = pool;
+            std::random_device rdev;
+            std::mt19937 gen(rdev());
+            std::shuffle(cands.begin(), cands.end(), gen);
+            if (cands.size() > 12) cands.resize(12);
+            int done = 0;
+            int tried = 0;
+            for (const auto& it : cands) {
+                if (done >= 2 || shuttingDown_ || busy_) break;
+                int reqH = 0;
+                int reqW = RequestWidth(it, tw, th, cap, reqH);
+                wchar_t name[160];
+                swprintf_s(name, L"wf_%d_%dx%d.jpg", it.id, reqW, reqH);
+                std::wstring srcFile = PathJoin(srcDir, name);
+                if (FileExists(srcFile)) continue;
+                ++tried;
+                std::wstring referer = WallpaperFeed::DetailReferer(it.href, it.id);
+                std::wstring derr;
+                if (WallpaperFeed::Download(it.id, referer, reqW, reqH, srcFile, derr)) {
+                    ++done;
+                    LogMsg(L"预取壁纸完成 id=%d %dx%d", it.id, reqW, reqH);
+                } else {
+                    LogMsg(L"预取壁纸失败 id=%d: %s", it.id, derr.c_str());
+                }
+            }
+            LogMsg(L"预取结束：新增 %d 张，尝试 %d 张", done, tried);
+        }
+        flag->store(false);
+    }).detach();
 }
 
 // 托盘菜单「收藏当前壁纸」：把正在桌面上的那张图加进收藏（写 favorites.txt + 后台下载高清备份）
@@ -1049,7 +1274,28 @@ void App::CleanupCache() {
 }
 
 uint64_t App::CacheBytes() const {
-    return DirSize(cacheDir_) + DirSize(PathJoin(dataDir_, L"thumbs"));
+    if (!cacheStat_) {
+        return DirSize(cacheDir_) + DirSize(PathJoin(dataDir_, L"thumbs"));
+    }
+    const uint64_t now = GetTickCount64();
+    const uint64_t last = cacheStat_->tick.load();
+    // 首次或超过 5 秒没有更新，就让后台线程重新统计，界面只读上一次的结果
+    if ((last == 0 || now - last > 5000) && !cacheStat_->running.exchange(true)) {
+        auto st = cacheStat_;
+        std::thread([st]() {
+            st->bytes = DirSize(st->dirs[0]) + DirSize(st->dirs[1]);
+            st->tick = GetTickCount64();
+            st->running = false;
+        }).detach();
+    }
+    if (last == 0) {
+        // 首次调用还没算完，先同步算一次（只在启动时发生）
+        uint64_t v = DirSize(cacheStat_->dirs[0]) + DirSize(cacheStat_->dirs[1]);
+        cacheStat_->bytes = v;
+        cacheStat_->tick = GetTickCount64();
+        return v;
+    }
+    return cacheStat_->bytes.load();
 }
 
 bool App::CheckStorage(bool force) {

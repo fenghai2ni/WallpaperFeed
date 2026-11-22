@@ -32,6 +32,17 @@ public:
     uint64_t CacheBytes() const;              // 壁纸数据总占用（含缩略图与收藏备份）
     bool CheckStorage(bool force = false);    // 按设置清理，返回是否有清理动作
 
+    // 空闲时提前把下一张候选图下到 src\，真正换壁纸时直接用本地文件，不再现下
+    void PrefetchNext();
+
+    // 占用统计在后台线程里算，界面每次刷新都直接读缓存值，不会卡在目录遍历上
+    struct CacheStat {
+        std::atomic<uint64_t> bytes{0};
+        std::atomic<uint64_t> tick{0};
+        std::atomic<bool> running{false};
+        std::wstring dirs[2];
+    };
+
 private:
     // 托盘
     void AddTrayIcon();
@@ -99,4 +110,9 @@ private:
     uint64_t cachedTick_ = 0;
 
     int lastScreenCount_ = 0;
+    std::shared_ptr<CacheStat> cacheStat_;
+    std::shared_ptr<std::atomic<bool>> prefetchFlag_;   // 预取线程是否在跑（线程里自己置回 false）
+    std::atomic<int> pfTargetW_{0};
+    std::atomic<int> pfTargetH_{0};
+    std::atomic<int> pfCapW_{0};
 };

@@ -164,4 +164,86 @@ bool RenderCoverCrop(const std::wstring& srcPath,
     return true;
 }
 
+bool RenderScreens(const std::wstring& srcPath,
+                   const std::vector<std::pair<int, int>>& targets,
+                   const std::vector<std::wstring>& dsts,
+                   int jpegQuality,
+                   std::wstring& err) {
+    if (targets.size() != dsts.size() || targets.empty()) {
+        err = L"多屏渲染参数不匹配";
+        return false;
+    }
+
+    // 源图只解码一次（多屏时原来每屏各解码一次，白烧两遍解码时间与内存）
+    Bitmap src(srcPath.c_str(), false);
+    if (src.GetLastStatus() != Ok) {
+        err = L"图片解码失败";
+        return false;
+    }
+    const int sw = (int)src.GetWidth();
+    const int sh = (int)src.GetHeight();
+    if (sw <= 0 || sh <= 0) {
+        err = L"图片尺寸无效";
+        return false;
+    }
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        int dw = targets[i].first;
+        int dh = targets[i].second;
+        if (dw <= 0 || dh <= 0) {
+            err = L"目标尺寸无效";
+            return false;
+        }
+
+        double scale = std::max((double)dw / sw, (double)dh / sh);
+        double sx = (sw - dw / scale) / 2.0;
+        double sy = (sh - dh / scale) / 2.0;
+        double srw = dw / scale;
+        double srh = dh / scale;
+
+        if (sx < 0) { srw += sx; sx = 0; }
+        if (sy < 0) { srh += sy; sy = 0; }
+        if (sx + srw > sw) srw = sw - sx;
+        if (sy + srh > sh) srh = sh - sy;
+
+        // 快路径：下载时已按屏幕宽度取图，宽度基本一致 → 直接 1:1 裁切，不做重采样
+        if (sw >= dw - 1 && sw <= dw + 1 && sh >= dh) {
+            int ox = (int)((sw - dw) / 2);
+            int oy = (int)((sh - dh) / 2);
+            Bitmap dst(dw, dh, PixelFormat24bppRGB);
+            if (dst.GetLastStatus() != Ok) { err = L"无法创建输出位图"; return false; }
+            Graphics g(&dst);
+            g.SetCompositingMode(CompositingModeSourceCopy);
+            g.DrawImage(&src, Rect(0, 0, dw, dh), ox, oy, dw, dh, UnitPixel);
+            if (!SaveJpeg(dst, dsts[i], jpegQuality)) { err = L"保存 JPEG 失败"; return false; }
+            continue;
+        }
+
+        Bitmap dst(dw, dh, PixelFormat24bppRGB);
+        if (dst.GetLastStatus() != Ok) { err = L"无法创建输出位图"; return false; }
+        {
+            Graphics g(&dst);
+            // 大倍率缩小时 HighQualityBicubic 非常慢（几十万像素重采样），画质收益几乎看不出来
+            if (scale < 0.6) {
+                g.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+                g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+                g.SetCompositingQuality(CompositingQualityHighSpeed);
+            } else {
+                g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+                g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+                g.SetCompositingQuality(CompositingQualityHighQuality);
+            }
+            g.DrawImage(&src,
+                        RectF(0.0f, 0.0f, (REAL)dw, (REAL)dh),
+                        (REAL)sx, (REAL)sy, (REAL)srw, (REAL)srh,
+                        UnitPixel);
+        }
+        if (!SaveJpeg(dst, dsts[i], jpegQuality)) {
+            err = L"保存 JPEG 失败";
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace gfx

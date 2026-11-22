@@ -198,6 +198,8 @@ void Library::PostUpdate() {
 // ── 列表加载 ────────────────────────────────────────────────────────────
 
 void Library::ListWorkerMain() {
+    // 后台抓列表用最低优先级，避免和前台程序、换壁纸线程抢 CPU
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (true) {
         std::unique_lock<std::mutex> lk(jobMu_);
@@ -477,6 +479,7 @@ void Library::EnqueueThumb(const ItemPtr& it) {
 }
 
 void Library::ThumbWorkerMain() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     while (true) {
         ItemPtr it;

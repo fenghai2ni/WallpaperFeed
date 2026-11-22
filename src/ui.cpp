@@ -608,7 +608,7 @@ void MainWindow::DrawSidebar(Graphics& g, int W, int H) {
             Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
     DrawStr(g, L"本地占用 " + FormatBytes(cacheBytes_), Rect(S(24), by + S(40), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
-    DrawStr(g, L"v1.5.0  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
+    DrawStr(g, L"v1.5.1  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 86, 96, 114), StringAlignmentNear, StringAlignmentNear, false);
 }
 
@@ -1068,7 +1068,7 @@ void MainWindow::DrawSettings(Graphics& g, int W, int H) {
     DrawStr(g, L"关于", Rect(x, y, w, S(22)), fSection_.get(), txt, StringAlignmentNear,
             StringAlignmentNear, false);
     y += S(28);
-    DrawStr(g, L"WallpaperFeed v1.5.0 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
+    DrawStr(g, L"WallpaperFeed v1.5.1 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
             Rect(x, y, w, S(20)), fSmall_.get(), Clr(255, 110, 121, 140), StringAlignmentNear,
             StringAlignmentNear);
     y += S(24);
@@ -1599,17 +1599,20 @@ bool MainWindow::ApplyOnBackground(const ItemPtr& item, ApplyKind kind, int moni
         msg = buf;
         return true;
     } else {
+        // 复制到所有屏：源图只解码一次，一次性生成各屏切片
+        std::vector<std::pair<int, int>> targets;
+        std::vector<std::wstring> dsts;
         for (size_t i = 0; i < screens.size(); ++i) {
             wchar_t fn[180];
             swprintf_s(fn, L"ui_clone_m%u_%d_%dx%d.jpg", (unsigned)i, item->id,
                        screens[i].width, screens[i].height);
             outs[i] = PathJoin(curDir_, fn);
-            if (!gfx::RenderCoverCrop(srcFile, screens[i].width, screens[i].height,
-                                      {RECT{0, 0, screens[i].width, screens[i].height}},
-                                      {outs[i]}, cfg.jpegQuality, err)) {
-                msg = L"生成壁纸失败：" + err;
-                return false;
-            }
+            targets.push_back({screens[i].width, screens[i].height});
+            dsts.push_back(outs[i]);
+        }
+        if (!gfx::RenderScreens(srcFile, targets, dsts, cfg.jpegQuality, err)) {
+            msg = L"生成壁纸失败：" + err;
+            return false;
         }
         if (!desk::ApplyPerScreen(screens, outs, err)) {
             msg = L"设置壁纸失败：" + err;
@@ -1656,6 +1659,7 @@ void MainWindow::ApplyItem(const ItemPtr& item, ApplyKind kind, int monitor) {
     if (applyThread_.joinable()) applyThread_.join();
 
     applyThread_ = std::thread([this, copy, k, mon, snapshot]() {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         std::wstring msg;
         bool ok = ApplyOnBackground(copy, k, mon, snapshot, msg);

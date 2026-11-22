@@ -20,4 +20,12 @@ bool RenderCoverCrop(const std::wstring& srcPath,
 // 只读取图片尺寸（用于校验/日志）
 bool GetImageSize(const std::wstring& path, int& w, int& h);
 
+// 一张源图同时生成多屏壁纸：源图只解码一次，逐屏 cover 裁切后保存。
+// 返回的图片宽度与屏幕宽度一致时走 1:1 裁切（不重采样），明显更快。
+bool RenderScreens(const std::wstring& srcPath,
+                   const std::vector<std::pair<int, int>>& targets,
+                   const std::vector<std::wstring>& dsts,
+                   int jpegQuality,
+                   std::wstring& err);
+
 } // namespace gfx

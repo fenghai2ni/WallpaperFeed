@@ -49,10 +49,53 @@ bool Crack(const std::wstring& url, UrlParts& out, std::wstring& err) {
     return true;
 }
 
-void CloseAll(HINTERNET session, HINTERNET conn, HINTERNET req) {
-    if (req) WinHttpCloseHandle(req);
-    if (conn) WinHttpCloseHandle(conn);
-    if (session) WinHttpCloseHandle(session);
+// 每个线程复用一条 WinHTTP 会话 + 连接：同一线程连续请求不再重复 TCP/TLS 握手，
+// 换壁纸时（列表 + 1~3 张下载）能省掉好几次握手，列表/缩略图线程收益更大。
+struct SessionCache {
+    HINTERNET session = nullptr;
+    HINTERNET conn = nullptr;
+    std::wstring host;
+    int port = 0;
+
+    ~SessionCache() {
+        if (conn) WinHttpCloseHandle(conn);
+        if (session) WinHttpCloseHandle(session);
+    }
+};
+
+thread_local SessionCache tls;
+
+bool EnsureSession(std::wstring& err) {
+    if (tls.session) return true;
+    tls.session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!tls.session) {
+        tls.session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
+    if (!tls.session) {
+        err = L"初始化网络会话失败";
+        return false;
+    }
+    // 连接 6s / 发送 8s / 接收 20s：站点响应慢时尽快失败换下一张，而不是一次挂 1 分钟
+    WinHttpSetTimeouts(tls.session, 6000, 8000, 20000, 20000);
+    return true;
+}
+
+bool EnsureConn(const UrlParts& up, std::wstring& err) {
+    if (tls.conn && tls.host == up.host && tls.port == up.port) return true;
+    if (tls.conn) {
+        WinHttpCloseHandle(tls.conn);
+        tls.conn = nullptr;
+    }
+    tls.conn = WinHttpConnect(tls.session, up.host.c_str(), (INTERNET_PORT)up.port, 0);
+    if (!tls.conn) {
+        err = L"连接服务器失败";
+        return false;
+    }
+    tls.host = up.host;
+    tls.port = up.port;
+    return true;
 }
 
 bool DoRequest(const std::wstring& url, const std::wstring& referer,
@@ -62,32 +105,17 @@ bool DoRequest(const std::wstring& url, const std::wstring& referer,
     UrlParts up;
     if (!Crack(url, up, err)) return false;
 
-    HINTERNET session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) {
-        session = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    }
-    if (!session) {
-        err = L"初始化网络会话失败";
-        return false;
-    }
-    WinHttpSetTimeouts(session, 15000, 15000, 30000, 30000);
+    if (!EnsureSession(err)) return false;
+    if (!EnsureConn(up, err)) return false;
 
-    HINTERNET conn = WinHttpConnect(session, up.host.c_str(), (INTERNET_PORT)up.port, 0);
-    if (!conn) {
-        err = L"连接服务器失败";
-        CloseAll(session, nullptr, nullptr);
-        return false;
-    }
-
-    HINTERNET req = WinHttpOpenRequest(conn, formBody ? L"POST" : L"GET", up.path.c_str(),
+    HINTERNET req = WinHttpOpenRequest(tls.conn, formBody ? L"POST" : L"GET", up.path.c_str(),
                                        nullptr, WINHTTP_NO_REFERER,
                                        WINHTTP_DEFAULT_ACCEPT_TYPES,
                                        up.https ? WINHTTP_FLAG_SECURE : 0);
     if (!req) {
         err = L"创建请求失败";
-        CloseAll(session, conn, nullptr);
+        // 连接可能已失效，下次重建
+        if (tls.conn) { WinHttpCloseHandle(tls.conn); tls.conn = nullptr; }
         return false;
     }
 
@@ -117,7 +145,9 @@ bool DoRequest(const std::wstring& url, const std::wstring& referer,
 
     if (!sent || !WinHttpReceiveResponse(req, nullptr)) {
         err = L"请求失败（网络不可达或超时）";
-        CloseAll(session, conn, req);
+        WinHttpCloseHandle(req);
+        // 这条连接可能已经坏了，丢掉让下次重建
+        if (tls.conn) { WinHttpCloseHandle(tls.conn); tls.conn = nullptr; }
         return false;
     }
 
@@ -140,7 +170,7 @@ bool DoRequest(const std::wstring& url, const std::wstring& referer,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) {
             err = L"无法写入临时文件";
-            CloseAll(session, conn, req);
+            WinHttpCloseHandle(req);
             return false;
         }
     }
@@ -171,7 +201,7 @@ bool DoRequest(const std::wstring& url, const std::wstring& referer,
 
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
 
-    CloseAll(session, conn, req);
+    WinHttpCloseHandle(req);
 
     if (!ok) {
         err = L"数据读取中断";
