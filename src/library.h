@@ -59,6 +59,7 @@ public:
 
     void ReloadFavorites();
     void ToggleFavorite(const ItemPtr& it);
+    bool AddFavorite(const WfItem& item);   // 收藏指定壁纸（托盘收藏当前桌面壁纸用）
     bool IsFavorite(int id) const;
     size_t FavoriteCount() const;
 

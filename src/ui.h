@@ -173,6 +173,9 @@ private:
     std::thread applyThread_;
     std::wstring applyResult_;
     bool applyOk_ = false;
+    WfItem pendingApply_;
+    int pendingKind_ = 0;    // 0 单屏 / 1 跨屏 / 2 复制
+    int pendingMon_ = 0;
 
     std::atomic<bool> shuttingDown_{false};
 };

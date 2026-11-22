@@ -20,7 +20,7 @@ namespace {
 
 const wchar_t* kClassName = L"WallpaperFeedTrayWnd";
 const wchar_t* kAppName = L"WallpaperFeed 壁纸";
-const wchar_t* kVersion = L"1.4.0";
+const wchar_t* kVersion = L"1.5.0";
 
 const UINT WM_APP_TRAY = WM_APP + 1;
 const UINT WM_APP_CHANGED = WM_APP + 2;
@@ -45,6 +45,7 @@ enum MenuId {
 
     ID_M_CAT_BASE = 2100,
     ID_M_RES_BASE = 2200,      // +0 = 不限，+1.. = GetResolutions() 顺序
+    ID_M_FAV_BASE = 2300,      // +0.. = 收藏当前桌面第 N 屏的壁纸
 
     ID_M_AUTOSTART = 3001,
     ID_M_OPEN_CACHE = 3002,
@@ -427,6 +428,53 @@ void App::ShowMenu(POINT pt) {
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_M_NEXT, busy_ ? L"下一张壁纸（正在切换…）" : L"下一张壁纸");
+
+    // 收藏当前桌面壁纸：按实际每屏记录决定菜单项（跨屏合一/复制时只有一张，就一项）
+    {
+        std::vector<WfItem> cur;
+        {
+            std::lock_guard<std::mutex> lk(curMu_);
+            cur = curItems_;
+        }
+        std::vector<int> slots;      // 有记录的屏索引
+        bool allSame = true;
+        int firstId = 0;
+        for (size_t i = 0; i < cur.size(); ++i) {
+            if (cur[i].id <= 0) continue;
+            slots.push_back((int)i);
+            if (firstId == 0) firstId = cur[i].id;
+            else if (cur[i].id != firstId) allSame = false;
+        }
+        if (slots.empty()) {
+            AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED,
+                        0, L"收藏当前壁纸（本次运行还没换过壁纸）");
+        } else if (slots.size() == 1 || allSame) {
+            const WfItem& it = cur[slots[0]];
+            bool faved = lib_ && lib_->IsFavorite(it.id);
+            std::wstring t = Utf8ToWide(it.title);
+            if (t.size() > 20) t = t.substr(0, 20) + L"…";
+            wchar_t buf[256];
+            if (slots.size() > 1) {
+                swprintf_s(buf, L"收藏当前壁纸（%d 屏同一张）：%ls", (int)slots.size(), t.c_str());
+            } else if (cfg_.mode == L"span" && lastScreenCount_ > 1) {
+                swprintf_s(buf, L"收藏当前壁纸（跨屏合一整张）：%ls", t.c_str());
+            } else {
+                swprintf_s(buf, L"收藏当前壁纸：%ls", t.c_str());
+            }
+            AppendMenuW(menu, MF_STRING | (faved ? MF_CHECKED : 0),
+                        ID_M_FAV_BASE + (UINT)slots[0], buf);
+        } else {
+            for (int slot : slots) {
+                bool faved = lib_ && lib_->IsFavorite(cur[slot].id);
+                std::wstring t = Utf8ToWide(cur[slot].title);
+                if (t.size() > 16) t = t.substr(0, 16) + L"…";
+                wchar_t buf[256];
+                swprintf_s(buf, L"收藏桌面 %d 壁纸：%ls", slot + 1, t.c_str());
+                AppendMenuW(menu, MF_STRING | (faved ? MF_CHECKED : 0),
+                            ID_M_FAV_BASE + (UINT)slot, buf);
+            }
+        }
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     // 模式
@@ -509,6 +557,20 @@ void App::OnCommand(UINT id) {
     }
     if (id == ID_M_NEXT) {
         StartChange(true);
+        return;
+    }
+    if (id >= ID_M_FAV_BASE && id < ID_M_FAV_BASE + 8) {
+        int idx = (int)(id - ID_M_FAV_BASE);
+        WfItem item;
+        bool ok = false;
+        {
+            std::lock_guard<std::mutex> lk(curMu_);
+            if (idx >= 0 && idx < (int)curItems_.size() && curItems_[idx].id > 0) {
+                item = curItems_[idx];
+                ok = true;
+            }
+        }
+        if (ok) FavoriteCurrent(item);
         return;
     }
     if (id >= ID_M_MODE_DIFF && id <= ID_M_MODE_CLONE) {
@@ -894,6 +956,18 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
         currentFiles_ = outFiles;
     }
 
+    // 记录「当前桌面上每屏对应哪张壁纸」，托盘菜单据此生成收藏项
+    {
+        std::vector<WfItem> perScreen;
+        for (size_t i = 0; i < screens.size(); ++i) {
+            size_t si = (spanMode || cloneMode) ? 0 : (i < chosen.size() ? i : 0);
+            perScreen.push_back(chosen[si]);
+        }
+        std::lock_guard<std::mutex> lk(curMu_);
+        curItems_.swap(perScreen);
+        curMode_ = cfg.mode;
+    }
+
     // 记录使用过的 id
     for (const auto& it : chosen) {
         recent_.Add(it.id);
@@ -916,6 +990,36 @@ bool App::PerformChange(const Config& cfg, std::wstring& resultMsg) {
     CleanupCache();
     CheckStorage(false);
     return true;
+}
+
+// 托盘菜单「收藏当前壁纸」：把正在桌面上的那张图加进收藏（写 favorites.txt + 后台下载高清备份）
+void App::FavoriteCurrent(const WfItem& item) {
+    if (!lib_) return;
+    std::wstring title = Utf8ToWide(item.title);
+    if (title.empty()) title = L"壁纸 #" + std::to_wstring(item.id);
+
+    if (!lib_->AddFavorite(item)) {
+        ShowTip(L"已经在收藏里了", title + L" 之前就已经收藏过。");
+        return;
+    }
+    if (ui_) ui_->OnLibraryUpdated();
+    ShowTip(L"已收藏当前壁纸", title + L"\n可在主界面「我的收藏」里查看，高清备份正在下载。");
+}
+
+// kind: 0 = 单屏，1 = 跨屏合一，2 = 复制到所有屏
+void App::RecordUiApplied(const WfItem& item, int kind, int monitor, int screenCount) {
+    if (item.id <= 0) return;
+    int n = screenCount > 0 ? screenCount : (lastScreenCount_ > 0 ? lastScreenCount_ : 1);
+    std::lock_guard<std::mutex> lk(curMu_);
+    if ((int)curItems_.size() != n) curItems_.assign(n, WfItem());
+    if (kind == 0) {
+        if (monitor < 0) monitor = 0;
+        if (monitor >= n) monitor = n - 1;
+        curItems_[monitor] = item;
+    } else {
+        for (auto& c : curItems_) c = item;
+    }
+    curMode_ = (kind == 1) ? L"span" : (kind == 2 ? L"clone" : L"different");
 }
 
 void App::ScheduleNext(bool ok) {

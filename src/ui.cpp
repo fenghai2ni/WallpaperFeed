@@ -608,7 +608,7 @@ void MainWindow::DrawSidebar(Graphics& g, int W, int H) {
             Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
     DrawStr(g, L"本地占用 " + FormatBytes(cacheBytes_), Rect(S(24), by + S(40), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
-    DrawStr(g, L"v1.4.0  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
+    DrawStr(g, L"v1.5.0  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 86, 96, 114), StringAlignmentNear, StringAlignmentNear, false);
 }
 
@@ -1068,7 +1068,7 @@ void MainWindow::DrawSettings(Graphics& g, int W, int H) {
     DrawStr(g, L"关于", Rect(x, y, w, S(22)), fSection_.get(), txt, StringAlignmentNear,
             StringAlignmentNear, false);
     y += S(28);
-    DrawStr(g, L"WallpaperFeed v1.4.0 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
+    DrawStr(g, L"WallpaperFeed v1.5.0 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
             Rect(x, y, w, S(20)), fSmall_.get(), Clr(255, 110, 121, 140), StringAlignmentNear,
             StringAlignmentNear);
     y += S(24);
@@ -1636,6 +1636,16 @@ void MainWindow::ApplyItem(const ItemPtr& item, ApplyKind kind, int monitor) {
     applying_ = true;
     applyOk_ = false;
     applyResult_.clear();
+    pendingApply_.id = item->id;
+    pendingApply_.w = item->w;
+    pendingApply_.h = item->h;
+    pendingApply_.title = item->title;
+    pendingApply_.href = item->href;
+    pendingApply_.thumbUrl = item->thumbUrl;
+    pendingMon_ = monitor;
+    pendingKind_ = (kind == ApplyKind::Monitor) ? 0
+                  : (kind == ApplyKind::Span ? 1 : 2);
+    if (kind == ApplyKind::ModeDefault) pendingKind_ = (cfg_->mode == L"span") ? 1 : 2;
     Toast(L"正在下载并应用到桌面…", 5000);
 
     Config snapshot = *cfg_;
@@ -1949,7 +1959,10 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_UI_APPLY_DONE: {
         applying_ = false;
         Toast(applyResult_, applyOk_ ? 3200 : 5200);
-        if (applyOk_ && app_) app_->NotifyManualApply();
+        if (applyOk_ && app_) {
+            app_->RecordUiApplied(pendingApply_, pendingKind_, pendingMon_, screenCount_);
+            app_->NotifyManualApply();
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }

@@ -26,6 +26,8 @@ public:
     void NotifySettingsChanged();
     void NotifyManualApply();
     void OpenMainWindow();
+    // 主界面里点了卡片上的应用图标后，把「当前桌面是哪张」记下来，供托盘收藏使用
+    void RecordUiApplied(const WfItem& item, int kind, int monitor, int screenCount);
 
     uint64_t CacheBytes() const;              // 壁纸数据总占用（含缩略图与收藏备份）
     bool CheckStorage(bool force = false);    // 按设置清理，返回是否有清理动作
@@ -44,6 +46,7 @@ private:
     // 切换
     void StartChange(bool manual);
     bool PerformChange(const Config& cfg, std::wstring& resultMsg);
+    void FavoriteCurrent(const WfItem& item);
     bool GetItems(const Config& cfg, std::vector<WfItem>& items, std::wstring& err);
     void BuildCandidates(const std::vector<WfItem>& pool, size_t want,
                          std::vector<WfItem>& out);
@@ -71,6 +74,11 @@ private:
     bool resultOk_ = false;
     std::wstring resultMsg_;
     std::vector<std::wstring> currentFiles_;
+
+    // 当前桌面上每屏对应的壁纸（托盘「收藏当前壁纸」用）
+    std::mutex curMu_;
+    std::vector<WfItem> curItems_;
+    std::wstring curMode_;
 
     bool busy_ = false;
     std::thread worker_;

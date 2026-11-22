@@ -781,6 +781,37 @@ void Library::ToggleFavorite(const ItemPtr& it) {
     PostUpdate();
 }
 
+// 收藏一张「当前正在桌面上的壁纸」：它可能不在当前列表里，所以单独造一条记录
+bool Library::AddFavorite(const WfItem& src) {
+    if (src.id <= 0) return false;
+    if (IsFavorite(src.id)) return false;
+
+    ItemPtr it = MakeItem(src);
+    it->favorite = true;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (favMap_.count(it->id)) return false;
+        favMap_[it->id] = it;
+        favOrder_.push_back(it->id);
+    }
+    SaveFavorites();
+    EnqueueFav(it);
+    LogMsg(L"收藏当前壁纸 id=%d", it->id);
+
+    if (mode_ == LibraryMode::Favorites) {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::vector<ItemPtr> list;
+        for (int id : favOrder_) {
+            auto f = favMap_.find(id);
+            if (f != favMap_.end()) list.push_back(f->second);
+        }
+        items_.swap(list);
+        noMore_ = true;
+    }
+    PostUpdate();
+    return true;
+}
+
 void Library::SaveFavorites() {
     std::string text;
     {
