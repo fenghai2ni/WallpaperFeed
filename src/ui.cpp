@@ -608,7 +608,7 @@ void MainWindow::DrawSidebar(Graphics& g, int W, int H) {
             Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
     DrawStr(g, L"本地占用 " + FormatBytes(cacheBytes_), Rect(S(24), by + S(40), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 116, 127, 146), StringAlignmentNear, StringAlignmentNear, false);
-    DrawStr(g, L"v1.5.1  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
+    DrawStr(g, L"v1.5.2  ·  wallpaperfeed.com", Rect(S(24), by + S(64), sw - S(34), S(18)),
             fSmall_.get(), Clr(255, 86, 96, 114), StringAlignmentNear, StringAlignmentNear, false);
 }
 
@@ -1068,7 +1068,7 @@ void MainWindow::DrawSettings(Graphics& g, int W, int H) {
     DrawStr(g, L"关于", Rect(x, y, w, S(22)), fSection_.get(), txt, StringAlignmentNear,
             StringAlignmentNear, false);
     y += S(28);
-    DrawStr(g, L"WallpaperFeed v1.5.1 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
+    DrawStr(g, L"WallpaperFeed v1.5.2 · 壁纸来自 wallpaperfeed.com，版权归原作者，仅供个人桌面使用",
             Rect(x, y, w, S(20)), fSmall_.get(), Clr(255, 110, 121, 140), StringAlignmentNear,
             StringAlignmentNear);
     y += S(24);

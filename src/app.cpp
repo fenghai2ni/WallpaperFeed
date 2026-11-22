@@ -21,7 +21,7 @@ namespace {
 
 const wchar_t* kClassName = L"WallpaperFeedTrayWnd";
 const wchar_t* kAppName = L"WallpaperFeed 壁纸";
-const wchar_t* kVersion = L"1.5.1";
+const wchar_t* kVersion = L"1.5.2";
 
 const UINT WM_APP_TRAY = WM_APP + 1;
 const UINT WM_APP_CHANGED = WM_APP + 2;
